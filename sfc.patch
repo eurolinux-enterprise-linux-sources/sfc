@@ -1,0 +1,196 @@
+diff --git a/drivers/net/sfc/efx.c b/drivers/net/sfc/efx.c
+index 5bc5e4f..3025edc 100644
+--- a/drivers/net/sfc/efx.c
++++ b/drivers/net/sfc/efx.c
+@@ -31,6 +31,7 @@
+ 
+ #include "mcdi.h"
+ #include "workarounds.h"
++#include "header.h"
+ 
+ /**************************************************************************
+  *
+@@ -2069,12 +2070,41 @@ static int efx_net_stop(struct net_device *net_dev)
+ }
+ 
+ /* Context: process, dev_base_lock or RTNL held, non-blocking. */
+-static struct rtnl_link_stats64 *efx_net_stats(struct net_device *net_dev, struct rtnl_link_stats64 *stats)
++static struct net_device_stats *efx_net_stats(struct net_device *net_dev)
+ {
+ 	struct efx_nic *efx = netdev_priv(net_dev);
++	struct net_device_stats *stats = &net_dev->stats;
++	struct rtnl_link_stats64 stats64;
+ 
++	memset(&stats64, 0, sizeof(struct rtnl_link_stats64));
+ 	spin_lock_bh(&efx->stats_lock);
+-	efx->type->update_stats(efx, NULL, stats);
++	efx->type->update_stats(efx, NULL, &stats64);
++
++	/* update stats with stats64, only 6.5.z DUP needs this */
++	stats->rx_packets = stats64.rx_packets;
++	stats->tx_packets = stats64.tx_packets;
++	stats->rx_bytes = stats64.rx_bytes;
++	stats->tx_bytes = stats64.tx_bytes;
++	stats->rx_errors = stats64.rx_errors;
++	stats->tx_errors = stats64.tx_errors;
++	stats->rx_dropped = stats64.rx_dropped;
++	stats->tx_dropped = stats64.tx_dropped;
++	stats->multicast = stats64.multicast;
++	stats->collisions = stats64.collisions;
++	stats->rx_length_errors = stats64.rx_length_errors;
++	stats->rx_over_errors = stats64.rx_over_errors;
++	stats->rx_crc_errors = stats64.rx_crc_errors;
++	stats->rx_frame_errors = stats64.rx_frame_errors;
++	stats->rx_fifo_errors = stats64.rx_fifo_errors;
++	stats->rx_missed_errors = stats64.rx_missed_errors;
++	stats->tx_aborted_errors = stats64.tx_aborted_errors;
++	stats->tx_carrier_errors = stats64.tx_carrier_errors;
++	stats->tx_fifo_errors = stats64.tx_fifo_errors;
++	stats->tx_heartbeat_errors = stats64.tx_heartbeat_errors;
++	stats->tx_window_errors = stats64.tx_window_errors;
++	stats->rx_compressed = stats64.rx_compressed;
++	stats->tx_compressed = stats64.tx_compressed;
++
+ 	spin_unlock_bh(&efx->stats_lock);
+ 
+ 	return stats;
+@@ -2157,6 +2187,7 @@ static void efx_set_multicast_list(struct net_device *net_dev)
+ static const struct net_device_ops efx_farch_netdev_ops = {
+ 	.ndo_open		= efx_net_open,
+ 	.ndo_stop		= efx_net_stop,
++	.ndo_get_stats		= efx_net_stats,
+ 	.ndo_tx_timeout		= efx_watchdog,
+ 	.ndo_start_xmit		= efx_hard_start_xmit,
+ 	.ndo_validate_addr	= eth_validate_addr,
+@@ -2174,14 +2205,10 @@ static const struct net_device_ops efx_farch_netdev_ops = {
+ #endif
+ };
+ 
+-static const struct net_device_ops_ext efx_netdev_ops_ext = {
+-	.size			= sizeof(struct net_device_ops_ext),
+-	.ndo_get_stats64	= efx_net_stats,
+-};
+-
+ static const struct net_device_ops efx_ef10_netdev_ops = {
+ 	.ndo_open		= efx_net_open,
+ 	.ndo_stop		= efx_net_stop,
++	.ndo_get_stats		= efx_net_stats,
+ 	.ndo_tx_timeout		= efx_watchdog,
+ 	.ndo_start_xmit		= efx_hard_start_xmit,
+ 	.ndo_validate_addr	= eth_validate_addr,
+@@ -2238,7 +2265,6 @@ static int efx_register_netdev(struct efx_nic *efx)
+ #endif
+ 	net_dev->watchdog_timeo = 5 * HZ;
+ 	net_dev->irq = efx->pci_dev->irq;
+-	set_netdev_ops_ext(net_dev, &efx_netdev_ops_ext);
+ 	if (efx_nic_rev(efx) >= EFX_REV_HUNT_A0) {
+ 		net_dev->netdev_ops = &efx_ef10_netdev_ops;
+ 	} else {
+diff --git a/drivers/net/sfc/header.c b/drivers/net/sfc/header.c
+new file mode 100644
+index 0000000..386b61c
+--- /dev/null
++++ b/drivers/net/sfc/header.c
+@@ -0,0 +1,75 @@
++#include "header.h"
++
++/**
++ * pci_enable_msi_range - configure device's MSI capability structure
++ * @dev: device to configure
++ * @minvec: minimal number of interrupts to configure
++ * @maxvec: maximum number of interrupts to configure
++ *
++ * This function tries to allocate a maximum possible number of interrupts in a
++ * range between @minvec and @maxvec. It returns a negative errno if an error
++ * occurs. If it succeeds, it returns the actual number of interrupts allocated
++ * and updates the @dev's irq member to the lowest new interrupt number;
++ * the other interrupt numbers allocated to this device are consecutive.
++ **/
++int pci_enable_msi_range(struct pci_dev *dev, int minvec, int maxvec)
++{
++	int nvec = maxvec;
++	int rc;
++
++	if (maxvec < minvec)
++		return -ERANGE;
++
++	do {
++		rc = pci_enable_msi_block(dev, nvec);
++		if (rc < 0) {
++			return rc;
++		} else if (rc > 0) {
++			if (rc < minvec)
++				return -ENOSPC;
++			nvec = rc;
++		}
++	} while (rc);
++
++	return nvec;
++}
++EXPORT_SYMBOL(pci_enable_msi_range);
++
++/**
++ * pci_enable_msix_range - configure device's MSI-X capability structure
++ * @dev: pointer to the pci_dev data structure of MSI-X device function
++ * @entries: pointer to an array of MSI-X entries
++ * @minvec: minimum number of MSI-X irqs requested
++ * @maxvec: maximum number of MSI-X irqs requested
++ *
++ * Setup the MSI-X capability structure of device function with a maximum
++ * possible number of interrupts in the range between @minvec and @maxvec
++ * upon its software driver call to request for MSI-X mode enabled on its
++ * hardware device function. It returns a negative errno if an error occurs.
++ * If it succeeds, it returns the actual number of interrupts allocated and
++ * indicates the successful configuration of MSI-X capability structure
++ * with new allocated MSI-X interrupts.
++ **/
++int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries,
++			       int minvec, int maxvec)
++{
++	int nvec = maxvec;
++	int rc;
++
++	if (maxvec < minvec)
++		return -ERANGE;
++
++	do {
++		rc = pci_enable_msix(dev, entries, nvec);
++		if (rc < 0) {
++			return rc;
++		} else if (rc > 0) {
++			if (rc < minvec)
++				return -ENOSPC;
++			nvec = rc;
++		}
++	} while (rc);
++
++	return nvec;
++}
++EXPORT_SYMBOL(pci_enable_msix_range);
+diff --git a/drivers/net/sfc/header.h b/drivers/net/sfc/header.h
+new file mode 100644
+index 0000000..a3125a2
+--- /dev/null
++++ b/drivers/net/sfc/header.h
+@@ -0,0 +1,21 @@
++#include <linux/pci.h>
++
++#define SIOCGHWTSTAMP   0x89b1          /* get config                   */
++
++#ifndef CONFIG_PCI_MSI
++static inline int pci_enable_msi_range(struct pci_dev *dev, int minvec,
++                                       int maxvec)
++{
++        return -ENOSYS;
++}
++static inline int pci_enable_msix_range(struct pci_dev *dev,
++                      struct msix_entry *entries, int minvec, int maxvec)
++{
++        return -ENOSYS;
++}
++#else
++int pci_enable_msi_range(struct pci_dev *dev, int minvec, int maxvec);
++int pci_enable_msix_range(struct pci_dev *dev, struct msix_entry *entries,
++                          int minvec, int maxvec);
++#endif
++
