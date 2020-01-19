@@ -1,0 +1,412 @@
+From 96659bee1597c82a3e18baff87f86f52c3451f44 Mon Sep 17 00:00:00 2001
+From: Petr Oros <poros@redhat.com>
+Date: Tue, 13 Sep 2016 12:45:41 +0200
+Subject: [PATCH] Backport sfc for rhel-7.2
+
+Signed-off-by: Petr Oros <poros@redhat.com>
+---
+ drivers/net/ethernet/sfc/ef10_sriov.c |   2 +-
+ drivers/net/ethernet/sfc/ef10_sriov.h |   2 +-
+ drivers/net/ethernet/sfc/efx.c        |  10 +-
+ drivers/net/ethernet/sfc/efx.h        |   3 +-
+ drivers/net/ethernet/sfc/ethtool.c    | 184 ----------------------------------
+ drivers/net/ethernet/sfc/net_driver.h |   2 +-
+ drivers/net/ethernet/sfc/sriov.c      |   2 +-
+ drivers/net/ethernet/sfc/sriov.h      |   2 +-
+ drivers/net/ethernet/sfc/tx.c         |  10 +-
+ 9 files changed, 13 insertions(+), 204 deletions(-)
+
+diff --git a/drivers/net/ethernet/sfc/ef10_sriov.c b/drivers/net/ethernet/sfc/ef10_sriov.c
+index a949b9d..7cafc48 100644
+--- a/drivers/net/ethernet/sfc/ef10_sriov.c
++++ b/drivers/net/ethernet/sfc/ef10_sriov.c
+@@ -762,7 +762,7 @@ int efx_ef10_sriov_get_vf_config(struct efx_nic *efx, int vf_i,
+ }
+ 
+ int efx_ef10_sriov_get_phys_port_id(struct efx_nic *efx,
+-				    struct netdev_phys_item_id *ppid)
++				    struct netdev_phys_port_id *ppid)
+ {
+ 	struct efx_ef10_nic_data *nic_data = efx->nic_data;
+ 
+diff --git a/drivers/net/ethernet/sfc/ef10_sriov.h b/drivers/net/ethernet/sfc/ef10_sriov.h
+index 9ceb7ef..a94c6eb 100644
+--- a/drivers/net/ethernet/sfc/ef10_sriov.h
++++ b/drivers/net/ethernet/sfc/ef10_sriov.h
+@@ -57,7 +57,7 @@ int efx_ef10_sriov_set_vf_link_state(struct efx_nic *efx, int vf_i,
+ 				     int link_state);
+ 
+ int efx_ef10_sriov_get_phys_port_id(struct efx_nic *efx,
+-				    struct netdev_phys_item_id *ppid);
++				    struct netdev_phys_port_id *ppid);
+ 
+ int efx_ef10_vswitching_probe_pf(struct efx_nic *efx);
+ int efx_ef10_vswitching_probe_vf(struct efx_nic *efx);
+diff --git a/drivers/net/ethernet/sfc/efx.c b/drivers/net/ethernet/sfc/efx.c
+index 9d1bd46..2351bf9 100644
+--- a/drivers/net/ethernet/sfc/efx.c
++++ b/drivers/net/ethernet/sfc/efx.c
+@@ -1360,7 +1360,7 @@ static unsigned int efx_wanted_parallelism(struct efx_nic *efx)
+ 			if (!cpumask_test_cpu(cpu, thread_mask)) {
+ 				++count;
+ 				cpumask_or(thread_mask, thread_mask,
+-					   topology_sibling_cpumask(cpu));
++					   topology_thread_cpumask(cpu));
+ 			}
+ 		}
+ 
+@@ -2390,7 +2390,7 @@ static void efx_update_name(struct efx_nic *efx)
+ static int efx_netdev_event(struct notifier_block *this,
+ 			    unsigned long event, void *ptr)
+ {
+-	struct net_device *net_dev = netdev_notifier_info_to_dev(ptr);
++	struct net_device *net_dev = ptr;
+ 
+ 	if ((net_dev->netdev_ops == &efx_netdev_ops) &&
+ 	    event == NETDEV_CHANGENAME)
+@@ -3520,7 +3520,7 @@ static int __init efx_init_module(void)
+ 
+ 	printk(KERN_INFO "Solarflare NET driver v" EFX_DRIVER_VERSION "\n");
+ 
+-	rc = register_netdevice_notifier_rh(&efx_netdev_notifier);
++	rc = register_netdevice_notifier(&efx_netdev_notifier);
+ 	if (rc)
+ 		goto err_notifier;
+ 
+@@ -3549,7 +3549,7 @@ static int __init efx_init_module(void)
+ 	efx_fini_sriov();
+  err_sriov:
+ #endif
+-	unregister_netdevice_notifier_rh(&efx_netdev_notifier);
++	unregister_netdevice_notifier(&efx_netdev_notifier);
+  err_notifier:
+ 	return rc;
+ }
+@@ -3563,7 +3563,7 @@ static void __exit efx_exit_module(void)
+ #ifdef CONFIG_SFC_SRIOV
+ 	efx_fini_sriov();
+ #endif
+-	unregister_netdevice_notifier_rh(&efx_netdev_notifier);
++	unregister_netdevice_notifier(&efx_netdev_notifier);
+ 
+ }
+ 
+diff --git a/drivers/net/ethernet/sfc/efx.h b/drivers/net/ethernet/sfc/efx.h
+index 342ae16..5cb22ec 100644
+--- a/drivers/net/ethernet/sfc/efx.h
++++ b/drivers/net/ethernet/sfc/efx.h
+@@ -32,8 +32,7 @@ netdev_tx_t efx_hard_start_xmit(struct sk_buff *skb,
+ 				struct net_device *net_dev);
+ netdev_tx_t efx_enqueue_skb(struct efx_tx_queue *tx_queue, struct sk_buff *skb);
+ void efx_xmit_done(struct efx_tx_queue *tx_queue, unsigned int index);
+-int efx_setup_tc(struct net_device *net_dev, u32 handle, __be16 proto,
+-		 struct tc_to_netdev *tc);
++int efx_setup_tc(struct net_device *net_dev, u8 num_tc);
+ unsigned int efx_tx_max_skb_descs(struct efx_nic *efx);
+ extern unsigned int efx_piobuf_size;
+ extern bool efx_separate_tx_channels;
+diff --git a/drivers/net/ethernet/sfc/ethtool.c b/drivers/net/ethernet/sfc/ethtool.c
+index 445ccdb..0347976 100644
+--- a/drivers/net/ethernet/sfc/ethtool.c
++++ b/drivers/net/ethernet/sfc/ethtool.c
+@@ -783,26 +783,14 @@ static int efx_ethtool_reset(struct net_device *net_dev, u32 *flags)
+ static const u8 mac_addr_ig_mask[ETH_ALEN] __aligned(2) = {0x01, 0, 0, 0, 0, 0};
+ 
+ #define IP4_ADDR_FULL_MASK	((__force __be32)~0)
+-#define IP_PROTO_FULL_MASK	0xFF
+ #define PORT_FULL_MASK		((__force __be16)~0)
+ #define ETHER_TYPE_FULL_MASK	((__force __be16)~0)
+ 
+-static inline void ip6_fill_mask(__be32 *mask)
+-{
+-	mask[0] = mask[1] = mask[2] = mask[3] = ~(__be32)0;
+-}
+-
+ static int efx_ethtool_get_class_rule(struct efx_nic *efx,
+ 				      struct ethtool_rx_flow_spec *rule)
+ {
+ 	struct ethtool_tcpip4_spec *ip_entry = &rule->h_u.tcp_ip4_spec;
+ 	struct ethtool_tcpip4_spec *ip_mask = &rule->m_u.tcp_ip4_spec;
+-	struct ethtool_usrip4_spec *uip_entry = &rule->h_u.usr_ip4_spec;
+-	struct ethtool_usrip4_spec *uip_mask = &rule->m_u.usr_ip4_spec;
+-	struct ethtool_tcpip6_spec *ip6_entry = &rule->h_u.tcp_ip6_spec;
+-	struct ethtool_tcpip6_spec *ip6_mask = &rule->m_u.tcp_ip6_spec;
+-	struct ethtool_usrip6_spec *uip6_entry = &rule->h_u.usr_ip6_spec;
+-	struct ethtool_usrip6_spec *uip6_mask = &rule->m_u.usr_ip6_spec;
+ 	struct ethhdr *mac_entry = &rule->h_u.ether_spec;
+ 	struct ethhdr *mac_mask = &rule->m_u.ether_spec;
+ 	struct efx_filter_spec spec;
+@@ -845,35 +833,6 @@ static int efx_ethtool_get_class_rule(struct efx_nic *efx,
+ 			ip_entry->psrc = spec.rem_port;
+ 			ip_mask->psrc = PORT_FULL_MASK;
+ 		}
+-	} else if ((spec.match_flags & EFX_FILTER_MATCH_ETHER_TYPE) &&
+-	    spec.ether_type == htons(ETH_P_IPV6) &&
+-	    (spec.match_flags & EFX_FILTER_MATCH_IP_PROTO) &&
+-	    (spec.ip_proto == IPPROTO_TCP || spec.ip_proto == IPPROTO_UDP) &&
+-	    !(spec.match_flags &
+-	      ~(EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_OUTER_VID |
+-		EFX_FILTER_MATCH_LOC_HOST | EFX_FILTER_MATCH_REM_HOST |
+-		EFX_FILTER_MATCH_IP_PROTO |
+-		EFX_FILTER_MATCH_LOC_PORT | EFX_FILTER_MATCH_REM_PORT))) {
+-		rule->flow_type = ((spec.ip_proto == IPPROTO_TCP) ?
+-				   TCP_V6_FLOW : UDP_V6_FLOW);
+-		if (spec.match_flags & EFX_FILTER_MATCH_LOC_HOST) {
+-			memcpy(ip6_entry->ip6dst, spec.loc_host,
+-			       sizeof(ip6_entry->ip6dst));
+-			ip6_fill_mask(ip6_mask->ip6dst);
+-		}
+-		if (spec.match_flags & EFX_FILTER_MATCH_REM_HOST) {
+-			memcpy(ip6_entry->ip6src, spec.rem_host,
+-			       sizeof(ip6_entry->ip6src));
+-			ip6_fill_mask(ip6_mask->ip6src);
+-		}
+-		if (spec.match_flags & EFX_FILTER_MATCH_LOC_PORT) {
+-			ip6_entry->pdst = spec.loc_port;
+-			ip6_mask->pdst = PORT_FULL_MASK;
+-		}
+-		if (spec.match_flags & EFX_FILTER_MATCH_REM_PORT) {
+-			ip6_entry->psrc = spec.rem_port;
+-			ip6_mask->psrc = PORT_FULL_MASK;
+-		}
+ 	} else if (!(spec.match_flags &
+ 		     ~(EFX_FILTER_MATCH_LOC_MAC | EFX_FILTER_MATCH_LOC_MAC_IG |
+ 		       EFX_FILTER_MATCH_REM_MAC | EFX_FILTER_MATCH_ETHER_TYPE |
+@@ -896,47 +855,6 @@ static int efx_ethtool_get_class_rule(struct efx_nic *efx,
+ 			mac_entry->h_proto = spec.ether_type;
+ 			mac_mask->h_proto = ETHER_TYPE_FULL_MASK;
+ 		}
+-	} else if (spec.match_flags & EFX_FILTER_MATCH_ETHER_TYPE &&
+-		   spec.ether_type == htons(ETH_P_IP) &&
+-		   !(spec.match_flags &
+-		     ~(EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_OUTER_VID |
+-		       EFX_FILTER_MATCH_LOC_HOST | EFX_FILTER_MATCH_REM_HOST |
+-		       EFX_FILTER_MATCH_IP_PROTO))) {
+-		rule->flow_type = IPV4_USER_FLOW;
+-		uip_entry->ip_ver = ETH_RX_NFC_IP4;
+-		if (spec.match_flags & EFX_FILTER_MATCH_IP_PROTO) {
+-			uip_mask->proto = IP_PROTO_FULL_MASK;
+-			uip_entry->proto = spec.ip_proto;
+-		}
+-		if (spec.match_flags & EFX_FILTER_MATCH_LOC_HOST) {
+-			uip_entry->ip4dst = spec.loc_host[0];
+-			uip_mask->ip4dst = IP4_ADDR_FULL_MASK;
+-		}
+-		if (spec.match_flags & EFX_FILTER_MATCH_REM_HOST) {
+-			uip_entry->ip4src = spec.rem_host[0];
+-			uip_mask->ip4src = IP4_ADDR_FULL_MASK;
+-		}
+-	} else if (spec.match_flags & EFX_FILTER_MATCH_ETHER_TYPE &&
+-		   spec.ether_type == htons(ETH_P_IPV6) &&
+-		   !(spec.match_flags &
+-		     ~(EFX_FILTER_MATCH_ETHER_TYPE | EFX_FILTER_MATCH_OUTER_VID |
+-		       EFX_FILTER_MATCH_LOC_HOST | EFX_FILTER_MATCH_REM_HOST |
+-		       EFX_FILTER_MATCH_IP_PROTO))) {
+-		rule->flow_type = IPV6_USER_FLOW;
+-		if (spec.match_flags & EFX_FILTER_MATCH_IP_PROTO) {
+-			uip6_mask->l4_proto = IP_PROTO_FULL_MASK;
+-			uip6_entry->l4_proto = spec.ip_proto;
+-		}
+-		if (spec.match_flags & EFX_FILTER_MATCH_LOC_HOST) {
+-			memcpy(uip6_entry->ip6dst, spec.loc_host,
+-			       sizeof(uip6_entry->ip6dst));
+-			ip6_fill_mask(uip6_mask->ip6dst);
+-		}
+-		if (spec.match_flags & EFX_FILTER_MATCH_REM_HOST) {
+-			memcpy(uip6_entry->ip6src, spec.rem_host,
+-			       sizeof(uip6_entry->ip6src));
+-			ip6_fill_mask(uip6_mask->ip6src);
+-		}
+ 	} else {
+ 		/* The above should handle all filters that we insert */
+ 		WARN_ON(1);
+@@ -1028,27 +946,11 @@ efx_ethtool_get_rxnfc(struct net_device *net_dev,
+ 	}
+ }
+ 
+-static inline bool ip6_mask_is_full(__be32 mask[4])
+-{
+-	return !~(mask[0] & mask[1] & mask[2] & mask[3]);
+-}
+-
+-static inline bool ip6_mask_is_empty(__be32 mask[4])
+-{
+-	return !(mask[0] | mask[1] | mask[2] | mask[3]);
+-}
+-
+ static int efx_ethtool_set_class_rule(struct efx_nic *efx,
+ 				      struct ethtool_rx_flow_spec *rule)
+ {
+ 	struct ethtool_tcpip4_spec *ip_entry = &rule->h_u.tcp_ip4_spec;
+ 	struct ethtool_tcpip4_spec *ip_mask = &rule->m_u.tcp_ip4_spec;
+-	struct ethtool_usrip4_spec *uip_entry = &rule->h_u.usr_ip4_spec;
+-	struct ethtool_usrip4_spec *uip_mask = &rule->m_u.usr_ip4_spec;
+-	struct ethtool_tcpip6_spec *ip6_entry = &rule->h_u.tcp_ip6_spec;
+-	struct ethtool_tcpip6_spec *ip6_mask = &rule->m_u.tcp_ip6_spec;
+-	struct ethtool_usrip6_spec *uip6_entry = &rule->h_u.usr_ip6_spec;
+-	struct ethtool_usrip6_spec *uip6_mask = &rule->m_u.usr_ip6_spec;
+ 	struct ethhdr *mac_entry = &rule->h_u.ether_spec;
+ 	struct ethhdr *mac_mask = &rule->m_u.ether_spec;
+ 	struct efx_filter_spec spec;
+@@ -1110,92 +1012,6 @@ static int efx_ethtool_set_class_rule(struct efx_nic *efx,
+ 			return -EINVAL;
+ 		break;
+ 
+-	case TCP_V6_FLOW:
+-	case UDP_V6_FLOW:
+-		spec.match_flags = (EFX_FILTER_MATCH_ETHER_TYPE |
+-				    EFX_FILTER_MATCH_IP_PROTO);
+-		spec.ether_type = htons(ETH_P_IPV6);
+-		spec.ip_proto = ((rule->flow_type & ~FLOW_EXT) == TCP_V6_FLOW ?
+-				 IPPROTO_TCP : IPPROTO_UDP);
+-		if (!ip6_mask_is_empty(ip6_mask->ip6dst)) {
+-			if (!ip6_mask_is_full(ip6_mask->ip6dst))
+-				return -EINVAL;
+-			spec.match_flags |= EFX_FILTER_MATCH_LOC_HOST;
+-			memcpy(spec.loc_host, ip6_entry->ip6dst, sizeof(spec.loc_host));
+-		}
+-		if (!ip6_mask_is_empty(ip6_mask->ip6src)) {
+-			if (!ip6_mask_is_full(ip6_mask->ip6src))
+-				return -EINVAL;
+-			spec.match_flags |= EFX_FILTER_MATCH_REM_HOST;
+-			memcpy(spec.rem_host, ip6_entry->ip6src, sizeof(spec.rem_host));
+-		}
+-		if (ip6_mask->pdst) {
+-			if (ip6_mask->pdst != PORT_FULL_MASK)
+-				return -EINVAL;
+-			spec.match_flags |= EFX_FILTER_MATCH_LOC_PORT;
+-			spec.loc_port = ip6_entry->pdst;
+-		}
+-		if (ip6_mask->psrc) {
+-			if (ip6_mask->psrc != PORT_FULL_MASK)
+-				return -EINVAL;
+-			spec.match_flags |= EFX_FILTER_MATCH_REM_PORT;
+-			spec.rem_port = ip6_entry->psrc;
+-		}
+-		if (ip6_mask->tclass)
+-			return -EINVAL;
+-		break;
+-
+-	case IPV4_USER_FLOW:
+-		if (uip_mask->l4_4_bytes || uip_mask->tos || uip_mask->ip_ver ||
+-		    uip_entry->ip_ver != ETH_RX_NFC_IP4)
+-			return -EINVAL;
+-		spec.match_flags = EFX_FILTER_MATCH_ETHER_TYPE;
+-		spec.ether_type = htons(ETH_P_IP);
+-		if (uip_mask->ip4dst) {
+-			if (uip_mask->ip4dst != IP4_ADDR_FULL_MASK)
+-				return -EINVAL;
+-			spec.match_flags |= EFX_FILTER_MATCH_LOC_HOST;
+-			spec.loc_host[0] = uip_entry->ip4dst;
+-		}
+-		if (uip_mask->ip4src) {
+-			if (uip_mask->ip4src != IP4_ADDR_FULL_MASK)
+-				return -EINVAL;
+-			spec.match_flags |= EFX_FILTER_MATCH_REM_HOST;
+-			spec.rem_host[0] = uip_entry->ip4src;
+-		}
+-		if (uip_mask->proto) {
+-			if (uip_mask->proto != IP_PROTO_FULL_MASK)
+-				return -EINVAL;
+-			spec.match_flags |= EFX_FILTER_MATCH_IP_PROTO;
+-			spec.ip_proto = uip_entry->proto;
+-		}
+-		break;
+-
+-	case IPV6_USER_FLOW:
+-		if (uip6_mask->l4_4_bytes || uip6_mask->tclass)
+-			return -EINVAL;
+-		spec.match_flags = EFX_FILTER_MATCH_ETHER_TYPE;
+-		spec.ether_type = htons(ETH_P_IPV6);
+-		if (!ip6_mask_is_empty(uip6_mask->ip6dst)) {
+-			if (!ip6_mask_is_full(uip6_mask->ip6dst))
+-				return -EINVAL;
+-			spec.match_flags |= EFX_FILTER_MATCH_LOC_HOST;
+-			memcpy(spec.loc_host, uip6_entry->ip6dst, sizeof(spec.loc_host));
+-		}
+-		if (!ip6_mask_is_empty(uip6_mask->ip6src)) {
+-			if (!ip6_mask_is_full(uip6_mask->ip6src))
+-				return -EINVAL;
+-			spec.match_flags |= EFX_FILTER_MATCH_REM_HOST;
+-			memcpy(spec.rem_host, uip6_entry->ip6src, sizeof(spec.rem_host));
+-		}
+-		if (uip6_mask->l4_proto) {
+-			if (uip6_mask->l4_proto != IP_PROTO_FULL_MASK)
+-				return -EINVAL;
+-			spec.match_flags |= EFX_FILTER_MATCH_IP_PROTO;
+-			spec.ip_proto = uip6_entry->l4_proto;
+-		}
+-		break;
+-
+ 	case ETHER_FLOW:
+ 		if (!is_zero_ether_addr(mac_mask->h_dest)) {
+ 			if (ether_addr_equal(mac_mask->h_dest,
+diff --git a/drivers/net/ethernet/sfc/net_driver.h b/drivers/net/ethernet/sfc/net_driver.h
+index 07ae90d..1e2487a 100644
+--- a/drivers/net/ethernet/sfc/net_driver.h
++++ b/drivers/net/ethernet/sfc/net_driver.h
+@@ -1351,7 +1351,7 @@ struct efx_nic_type {
+ 	int (*sriov_set_vf_link_state)(struct efx_nic *efx, int vf_i,
+ 				       int link_state);
+ 	int (*sriov_get_phys_port_id)(struct efx_nic *efx,
+-				      struct netdev_phys_item_id *ppid);
++				      struct netdev_phys_port_id *ppid);
+ 	int (*vswitching_probe)(struct efx_nic *efx);
+ 	int (*vswitching_restore)(struct efx_nic *efx);
+ 	void (*vswitching_remove)(struct efx_nic *efx);
+diff --git a/drivers/net/ethernet/sfc/sriov.c b/drivers/net/ethernet/sfc/sriov.c
+index 816c446..879a7b2 100644
+--- a/drivers/net/ethernet/sfc/sriov.c
++++ b/drivers/net/ethernet/sfc/sriov.c
+@@ -72,7 +72,7 @@ int efx_sriov_set_vf_link_state(struct net_device *net_dev, int vf_i,
+ }
+ 
+ int efx_sriov_get_phys_port_id(struct net_device *net_dev,
+-			       struct netdev_phys_item_id *ppid)
++			       struct netdev_phys_port_id *ppid)
+ {
+ 	struct efx_nic *efx = netdev_priv(net_dev);
+ 
+diff --git a/drivers/net/ethernet/sfc/sriov.h b/drivers/net/ethernet/sfc/sriov.h
+index 400df52..0049945 100644
+--- a/drivers/net/ethernet/sfc/sriov.h
++++ b/drivers/net/ethernet/sfc/sriov.h
+@@ -24,7 +24,7 @@ int efx_sriov_get_vf_config(struct net_device *net_dev, int vf_i,
+ int efx_sriov_set_vf_link_state(struct net_device *net_dev, int vf_i,
+ 				int link_state);
+ int efx_sriov_get_phys_port_id(struct net_device *net_dev,
+-			       struct netdev_phys_item_id *ppid);
++			       struct netdev_phys_port_id *ppid);
+ 
+ #endif /* CONFIG_SFC_SRIOV */
+ 
+diff --git a/drivers/net/ethernet/sfc/tx.c b/drivers/net/ethernet/sfc/tx.c
+index 2337789..f7a0ec1 100644
+--- a/drivers/net/ethernet/sfc/tx.c
++++ b/drivers/net/ethernet/sfc/tx.c
+@@ -562,20 +562,14 @@ void efx_init_tx_queue_core_txq(struct efx_tx_queue *tx_queue)
+ 				     efx->n_tx_channels : 0));
+ }
+ 
+-int efx_setup_tc(struct net_device *net_dev, u32 handle, __be16 proto,
+-		 struct tc_to_netdev *ntc)
++int efx_setup_tc(struct net_device *net_dev, u8 num_tc)
+ {
+ 	struct efx_nic *efx = netdev_priv(net_dev);
+ 	struct efx_channel *channel;
+ 	struct efx_tx_queue *tx_queue;
+-	unsigned tc, num_tc;
++	unsigned tc;
+ 	int rc;
+ 
+-	if (ntc->type != TC_SETUP_MQPRIO)
+-		return -EINVAL;
+-
+-	num_tc = ntc->tc;
+-
+ 	if (efx_nic_rev(efx) < EFX_REV_FALCON_B0 || num_tc > EFX_MAX_TX_TC)
+ 		return -EINVAL;
+ 
+-- 
+1.8.3.1
+
